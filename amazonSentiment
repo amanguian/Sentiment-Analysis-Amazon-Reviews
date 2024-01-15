@@ -1,0 +1,187 @@
+library(rvest)
+library(tidyverse)
+library(tidytext)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(tidytext)
+library(caret)
+
+setwd("C:/Users/mangu/OneDrive/Bureau/R")
+
+reviews <- read.csv("Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products.csv", header = TRUE, stringsAsFactors = FALSE)
+
+
+#let's see what the data talks about:
+
+head(reviews)
+
+
+aggregate function to count the number of reviews for each product
+product_reviews <- aggregate(reviews$reviews.rating, by = list(reviews$name), FUN = length)
+
+Ordering the products by the number of reviews in descending order
+top_products <- product_reviews[order(product_reviews$x, decreasing = TRUE), ]
+
+top N products
+N <- 10 # Change this value to select a different number of top products
+top_N_products <- top_products[1:N, ]
+
+
+
+sentiment analysis on customer reviews
+
+
+
+#1-What are the most common sentiments expressed in customer reviews of Amazon products (positive or negative)?
+
+
+
+#5000 reviews and 5000 ratings:
+
+afinn <- read.table("AFINN-111.txt", header = FALSE, sep = "\t",
+                    col.names = c("word", "score"), 
+                    stringsAsFactors = FALSE, 
+                    fill = TRUE, 
+                    comment.char = ";",
+                    quote = "")
+
+sentiment_score <- function(text) {
+  words <- unlist(str_split(text, "\\W+"))
+  score <- sum(afinn$score[match(words, afinn$word)], na.rm = TRUE)
+  return(score)
+}
+
+#adding a sentiment score to each word in all the reviews
+reviews_sentiment <- reviews %>% 
+  select(reviews.text, reviews.rating) %>% 
+  drop_na() %>% 
+  mutate(sentiment = map_dbl(reviews.text, sentiment_score)) %>% 
+  unnest_tokens(word, reviews.text) %>% 
+  anti_join(stop_words)
+
+
+
+# plot a histogram of sentiment scores
+ggplot(reviews_sentiment, aes(x = sentiment)) +
+  geom_histogram(binwidth = 1, color = "white", fill = "skyblue") +
+  ggtitle("Distribution of Sentiment Scores") +
+  xlab("Sentiment Score") +
+  ylab("Frequency")
+
+
+#Let's see the most common words
+
+# group by sentiment score and count of the most frequent words
+top_words <- reviews_sentiment %>% 
+  count(word, sort = TRUE)
+
+
+head(top_words, n=10)
+
+
+
+#Can we predict a product's rating based on its features, such as name and category?
+
+relevant_columns = reviews[, c("categories", "name", "reviews.rating")]
+
+
+
+#dummy variables for categories
+dummy_cats <- dummyVars(" ~ categories", data = relevant_columns)
+df_cats <- data.frame(predict(dummy_cats, newdata = relevant_columns))
+
+
+#dummy variables for name
+dummy_name <- dummyVars(" ~ name", data = relevant_columns)
+df_name <- data.frame(predict(dummy_name, newdata = relevant_columns))
+
+df_final <- cbind(df_cats, df_name, rating = relevant_columns$`reviews.rating`)
+
+
+
+set.seed(123)
+train_index <- createDataPartition(df_final$rating, p = 0.7, list = FALSE)
+train_data <- df_final[train_index, ]
+test_data <- df_final[-train_index, ]
+
+model <- lm(rating ~ ., data = train_data)
+predictions <- predict(model, newdata = test_data)
+
+# Evaluating model performance using mean squared error
+mse <- mean((predictions - test_data$rating)^2)
+print(paste0("Mean Squared Error: ", mse))
+# MSE of 0.537765268913495 so not great prediction
+
+
+
+
+
+#Can we use sentiment analysis to identify which aspects of a product customers tend to praise or criticize most frequently?
+
+
+
+reviews_processed <- reviews %>% 
+  select(reviews.text, reviews.rating, name) %>% 
+  drop_na() %>%
+  mutate(sentiment = purrr::map_dbl(reviews.text, sentiment_score))
+
+#the worst observations are
+worst_observations <- reviews_processed %>% filter(sentiment < 0)
+#267 observation
+
+# counting the frequency of each product
+product_counts <- table(worst_observations$name)
+
+# finding the index of the product with the highest frequency
+most_common_product_index <- which.max(product_counts)
+
+# extracting the name of the most common product
+most_common_product_name <- names(product_counts)[most_common_product_index]
+
+
+cat("The most criticized product in worst_observations is", most_common_product_name, "\n")
+#All-New Fire HD 8 Tablet, 8" HD Display, Wi-Fi, 16 GB - Includes Special Offers, Magenta 
+
+worst_product = worst_observations %>%
+  filter(name == "All-New Fire HD 8 Tablet, 8\" HD Display, Wi-Fi, 16 GB - Includes Special Offers, Magenta")
+
+worst_words_processed <- worst_product %>% 
+  select(reviews.text, reviews.rating, name) %>% 
+  drop_na() %>% 
+  mutate(sentiment = purrr::map_dbl(reviews.text, sentiment_score))
+
+worst_words <- worst_words_processed %>% 
+  unnest_tokens(word, reviews.text) %>% 
+  group_by(word) %>% 
+  summarize(sentiment = mean(sentiment)) %>% 
+  top_n(-10, sentiment)
+
+#Hence worst_words gives out the most common issues of the worst product
+worst_words %>%
+  arrange(sentiment) %>%
+  head(20)
+
+ 
+
+best_observations <- reviews_processed %>% 
+  filter(sentiment > 0)
+#3876 observations
+
+
+worst_product2 = best_observations %>%
+  filter(name == "All-New Fire HD 8 Tablet, 8\" HD Display, Wi-Fi, 16 GB - Includes Special Offers, Magenta")
+
+
+
+best_words <- worst_product2 %>%
+  unnest_tokens(word, reviews.text) %>%
+  mutate(score = map_dbl(word, ~afinn$score[match(tolower(.x), afinn$word)])) %>%
+  group_by(word) %>%
+  summarize(avg_score = mean(score)) %>%
+  arrange(desc(avg_score)) %>%
+  top_n(20, avg_score) 
+
+head(best_words, n=20)
